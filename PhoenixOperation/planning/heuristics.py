@@ -44,7 +44,6 @@ def ignorePreconditionsHeuristic(
          with the initial state, or generate all groundings regardless of state).
          Remember: with no preconditions, every grounding is "applicable".
     """
-    ### Your code here ###
     unsatisfied = goal - state
     if not unsatisfied:
         return 0
@@ -61,7 +60,6 @@ def ignorePreconditionsHeuristic(
         count += 1
 
     return count
-    ### End of your code ###
 
 
 # ---------------------------------------------------------------------------
