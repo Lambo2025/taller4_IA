@@ -10,7 +10,7 @@ from planning.pddl import (
     Objects,
     get_all_groundings,
 )
-from planning.utils import Queue, PriorityQueue
+from planning.utils import Queue, Stack, PriorityQueue
 from planning.heuristics import nullHeuristic
 
 
@@ -138,7 +138,20 @@ def forwardBFS(problem: Problem) -> list[Action]:
          avoid revisiting the same state twice (graph search, not tree search).
     """
     ### Your code here ###
+    frontier = Queue()
+    frontier.push((problem.getStartState(), []))
+    visited = {problem.getStartState()}
 
+    while not frontier.isEmpty():
+        state, plan = frontier.pop()
+        if problem.isGoalState(state):
+            return plan
+        for next_state, action, _ in problem.getSuccessors(state):
+            if next_state not in visited:
+                visited.add(next_state)
+                frontier.push((next_state, plan + [action]))
+
+    return []
     ### End of your code ###
 
 
@@ -164,7 +177,11 @@ def regress(goal_set: State, action: Action) -> State | None:
          Check relevance first, then check for contradictions, then compute.
     """
     ### Your code here ###
-
+    if action.add_list.isdisjoint(goal_set):
+        return None
+    if not action.del_list.isdisjoint(goal_set):
+        return None
+    return (goal_set - action.add_list) | action.precond_pos
     ### End of your code ###
 
 
@@ -187,7 +204,53 @@ def backwardSearch(problem: Problem) -> list[Action]:
          Pickable) that are false in the initial state — these are dead ends.
     """
     ### Your code here ###
+    static = {"MedicalPost", "Adjacent"}
+    all_actions = get_all_groundings(problem.domain, problem.objects)
 
+    def simplify(goal_desc):
+        """Elimina fluents estáticos satisfechos — nunca cambian, siempre verdaderos."""
+        return frozenset(f for f in goal_desc if f[0] not in static or f not in problem.initial_state)
+
+    def is_consistent(goal_desc):
+        """Descarta goals donde la misma entidad aparece At en dos lugares distintos."""
+        at_locs = {}
+        for f in goal_desc:
+            if f[0] == "At":
+                entity, loc = f[1], f[2]
+                if entity in at_locs and at_locs[entity] != loc:
+                    return False
+                at_locs[entity] = loc
+        return True
+
+    frontier = Queue()
+    start = simplify(problem.goal)
+    frontier.push((start, []))
+    visited = {start}
+
+    while not frontier.isEmpty():
+        goal_desc, plan = frontier.pop()
+        problem._expanded += 1
+
+        if goal_desc.issubset(problem.initial_state):
+            return plan
+
+        unsatisfied = goal_desc - problem.initial_state
+
+        for action in all_actions:
+            if action.add_list.isdisjoint(unsatisfied):
+                continue
+            new_goal = regress(goal_desc, action)
+            if new_goal is None:
+                continue
+            if any(f[0] in static and f not in problem.initial_state for f in new_goal):
+                continue
+            new_goal = simplify(new_goal)
+            if new_goal in visited or not is_consistent(new_goal):
+                continue
+            visited.add(new_goal)
+            frontier.push((new_goal, [action] + plan))
+
+    return []
     ### End of your code ###
 
 
