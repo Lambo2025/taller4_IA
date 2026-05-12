@@ -277,7 +277,30 @@ def aStarPlanner(
          Track the best g-cost seen for each state to avoid stale expansions.
     """
     ### Your code here ###
+    start = problem.getStartState()
+    h0 = heuristic(start, problem.goal, problem.domain, problem.objects)
+    frontier = PriorityQueue()
+    frontier.push((start, []), h0)
+    best_g = {start: 0}
 
+    while not frontier.isEmpty():
+        state, plan = frontier.pop()
+        g = len(plan)
+
+        if problem.isGoalState(state):
+            return plan
+
+        if g > best_g.get(state, float("inf")):
+            continue
+
+        for next_state, action, cost in problem.getSuccessors(state):
+            new_g = g + cost
+            if new_g < best_g.get(next_state, float("inf")):
+                best_g[next_state] = new_g
+                h = heuristic(next_state, problem.goal, problem.domain, problem.objects)
+                frontier.push((next_state, plan + [action]), new_g + h)
+
+    return []
     ### End of your code ###
 
 
