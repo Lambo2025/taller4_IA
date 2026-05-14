@@ -83,51 +83,60 @@ def ignoreDeleteListsHeuristic(
     Estimate the plan cost by solving a relaxed problem where no action
     has a delete list (effects never remove fluents from the state).
 
-    In this monotone relaxation, the state only grows over time (fluents are
-    never removed), so hill-climbing always makes progress and cannot loop.
-
-    Algorithm (hill-climbing on the relaxed problem):
-      1. Start from the current state with a relaxed (monotone) apply function.
-      2. At each step, pick the grounded action that adds the most unsatisfied
-         goal fluents (greedy hill-climbing).
-      3. Count steps until all goal fluents are satisfied (or until no progress).
-
-    OPTIMIZACIÓN PRINCIPAL: en vez de llamar get_applicable_actions() que
-    internamente llama get_all_groundings() en cada iteración del hill-climbing
-    (O(|groundings|) repetidas veces), usamos la caché de groundings y filtramos
-    directamente sobre la lista cacheada. Esto evita re-crear miles de objetos
-    Action en cada paso del hill-climbing.
+    IMPLEMENTACIÓN CORREGIDA: usa un relaxed planning graph (capas de
+    proposiciones y acciones) en vez de hill-climbing greedy.
+    
+    El problema con hill-climbing greedy es que para un goal de 1 fluente
+    siempre devuelve 1 (la acción que lo satisface), sin considerar cuántas
+    acciones previas se necesitan para habilitar sus precondiciones.
+    
+    El relaxed planning graph construye capas P0, A0, P1, A1, ... hasta que
+    el goal está en alguna capa Pi. El número de capas de acción necesarias
+    es la estimación del costo.
     """
-    # Usar set mutable para el estado relajado (más rápido que frozenset para |=)
-    relaxed_state = set(state)
-    goal_set = set(goal)
-    count = 0
+    # Capa inicial de proposiciones
+    prop_layer = set(state)
 
-    # get_all_groundings usa caché → se computa UNA sola vez por run
+    if goal.issubset(prop_layer):
+        return 0
+
     all_actions = get_all_groundings(domain, objects)
 
-    while not goal_set.issubset(relaxed_state):
-        # Filtrar acciones aplicables directamente (sin crear frozenset temporal)
-        unsatisfied = goal_set - relaxed_state
-        best_action = None
-        best_gain = 0
+    # Excluir Move: en el dominio de rescate Move no contribuye a ningún
+    # fluente del goal (Rescued, SuppliesReady, Holding, etc.) y añade
+    # muchísimo ruido que hace la heurística menos informativa.
+    # En el problema relajado, asumimos que el robot puede estar en cualquier
+    # lugar sin costo adicional.
+    symbolic_actions = [a for a in all_actions if not a.name.startswith("Move")]
 
-        for action in all_actions:
-            # Verificar aplicabilidad sin crear frozenset (usando issubset sobre set)
-            if not action.precond_pos.issubset(relaxed_state):
-                continue
-            if not action.precond_neg.isdisjoint(relaxed_state):
-                continue
-            gain = len(action.add_list - relaxed_state)
-            if gain > best_gain:
-                best_gain = gain
-                best_action = action
+    # Añadir fluentes de posición del robot para todas las celdas (robot puede
+    # ir a cualquier sitio "gratis" en el problema relajado sin Move)
+    robot_pos_fluents = {f for f in all_actions[0].precond_pos
+                         if False}  # placeholder
+    cells = objects.get("cells", [])
+    for cell in cells:
+        prop_layer.add(("At", "robot", cell))
 
-        if best_action is None or best_gain == 0:
+    if goal.issubset(prop_layer):
+        return 0
+
+    # Construir el relaxed planning graph capa por capa
+    max_layers = 20
+    for layer in range(1, max_layers + 1):
+        new_props = set()
+        for action in symbolic_actions:
+            # En problema relajado: precond_pos debe estar, precond_neg ignorada
+            if action.precond_pos.issubset(prop_layer):
+                new_props |= action.add_list
+
+        added = new_props - prop_layer
+        if not added:
+            # No hay progreso → meta inalcanzable
             return float("inf")
 
-        # Aplicar en modo relajado: solo agregar, nunca borrar
-        relaxed_state |= best_action.add_list
-        count += 1
+        prop_layer |= added
 
-    return count
+        if goal.issubset(prop_layer):
+            return layer
+
+    return float("inf")
