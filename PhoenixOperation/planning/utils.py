@@ -1,5 +1,6 @@
 import sys
 import heapq
+from collections import deque
 
 
 class Stack:
@@ -19,19 +20,25 @@ class Stack:
 
 
 class Queue:
-    """A container with a first-in-first-out (FIFO) queuing policy."""
+    """
+    A container with a first-in-first-out (FIFO) queuing policy.
+
+    OPTIMIZACIÓN: usa collections.deque en vez de list.
+    list.insert(0, item) es O(n) porque desplaza todos los elementos.
+    deque.appendleft() es O(1), lo que acelera BFS con miles de nodos.
+    """
 
     def __init__(self):
-        self.list = []
+        self._dq: deque = deque()
 
     def push(self, item):
-        self.list.insert(0, item)
+        self._dq.appendleft(item)
 
     def pop(self):
-        return self.list.pop()
+        return self._dq.pop()
 
     def isEmpty(self):
-        return len(self.list) == 0
+        return len(self._dq) == 0
 
 
 class PriorityQueue:

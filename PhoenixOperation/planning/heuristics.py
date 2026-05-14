@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from planning.pddl import ActionSchema, State, Objects, get_all_groundings, get_applicable_actions
+from planning.pddl import ActionSchema, State, Objects, get_all_groundings, get_applicable_actions, is_applicable
 
 
 def nullHeuristic(
@@ -39,24 +39,30 @@ def ignorePreconditionsHeuristic(
       3. Greedily pick the action whose add_list covers the most unsatisfied fluents.
       4. Repeat until all fluents are covered; count the actions used.
 
-    Tip: frozenset supports set difference (-) and intersection (&).
-         You only need to ground actions once per call (use get_applicable_actions
-         with the initial state, or generate all groundings regardless of state).
-         Remember: with no preconditions, every grounding is "applicable".
+    OPTIMIZACIÓN: get_all_groundings tiene caché global, así que la primera
+    llamada es costosa pero las siguientes son O(1). No instanciamos acciones
+    de nuevo; reutilizamos las mismas referencias.
     """
     unsatisfied = goal - state
     if not unsatisfied:
         return 0
 
+    # get_all_groundings usa caché → rápido en llamadas repetidas
     all_actions = get_all_groundings(domain, objects)
-    count = 0
 
+    # Pre-computar intersecciones solo con fluentes del goal para acelerar max()
+    count = 0
     while unsatisfied:
-        best = max(all_actions, key=lambda a: len(a.add_list & unsatisfied))
-        covered = best.add_list & unsatisfied
-        if not covered:
+        best_count = 0
+        best_covered: frozenset = frozenset()
+        for a in all_actions:
+            covered = a.add_list & unsatisfied
+            if len(covered) > best_count:
+                best_count = len(covered)
+                best_covered = covered
+        if not best_covered:
             return float("inf")
-        unsatisfied -= covered
+        unsatisfied -= best_covered
         count += 1
 
     return count
@@ -86,25 +92,42 @@ def ignoreDeleteListsHeuristic(
          goal fluents (greedy hill-climbing).
       3. Count steps until all goal fluents are satisfied (or until no progress).
 
-    Tip: In the relaxed problem, apply_action never removes fluents.
-         You can implement this by treating del_list as empty for all actions.
-         Use get_applicable_actions to enumerate applicable grounded actions at
-         each step (preconditions still apply in the relaxed model).
+    OPTIMIZACIÓN PRINCIPAL: en vez de llamar get_applicable_actions() que
+    internamente llama get_all_groundings() en cada iteración del hill-climbing
+    (O(|groundings|) repetidas veces), usamos la caché de groundings y filtramos
+    directamente sobre la lista cacheada. Esto evita re-crear miles de objetos
+    Action en cada paso del hill-climbing.
     """
-    ### Your code here ###
+    # Usar set mutable para el estado relajado (más rápido que frozenset para |=)
     relaxed_state = set(state)
+    goal_set = set(goal)
     count = 0
 
-    while not goal.issubset(relaxed_state):
-        applicable = get_applicable_actions(frozenset(relaxed_state), domain, objects)
-        if not applicable:
+    # get_all_groundings usa caché → se computa UNA sola vez por run
+    all_actions = get_all_groundings(domain, objects)
+
+    while not goal_set.issubset(relaxed_state):
+        # Filtrar acciones aplicables directamente (sin crear frozenset temporal)
+        unsatisfied = goal_set - relaxed_state
+        best_action = None
+        best_gain = 0
+
+        for action in all_actions:
+            # Verificar aplicabilidad sin crear frozenset (usando issubset sobre set)
+            if not action.precond_pos.issubset(relaxed_state):
+                continue
+            if not action.precond_neg.isdisjoint(relaxed_state):
+                continue
+            gain = len(action.add_list - relaxed_state)
+            if gain > best_gain:
+                best_gain = gain
+                best_action = action
+
+        if best_action is None or best_gain == 0:
             return float("inf")
-        best = max(applicable, key=lambda a: len(a.add_list - relaxed_state))
-        gained = best.add_list - relaxed_state
-        if not gained:
-            return float("inf")
-        relaxed_state |= best.add_list
+
+        # Aplicar en modo relajado: solo agregar, nunca borrar
+        relaxed_state |= best_action.add_list
         count += 1
 
     return count
-    ### End of your code ###

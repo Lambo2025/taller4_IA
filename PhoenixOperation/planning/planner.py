@@ -133,22 +133,35 @@ def forwardBFS(problem: Problem) -> list[Action]:
 
     Returns a list of Action objects forming a valid plan, or [] if no plan exists.
 
-    Tip: The state is a frozenset of fluents. Use problem.getSuccessors(state)
-         to get (next_state, action, cost) triples. Track visited states to
-         avoid revisiting the same state twice (graph search, not tree search).
+    OPTIMIZACIÓN: en vez de copiar plan + [action] en cada nodo (O(d) por nodo,
+    O(d²) total), guardamos un dict de punteros padre {state: (parent_state, action)}.
+    El plan se reconstruye UNA sola vez al final en O(d).
     """
+    start = problem.getStartState()
+    if problem.isGoalState(start):
+        return []
+
+    # parent[state] = (parent_state, action_taken)
+    parent: dict = {start: None}
     frontier = Queue()
-    frontier.push((problem.getStartState(), []))
-    visited = {problem.getStartState()}
+    frontier.push(start)
 
     while not frontier.isEmpty():
-        state, plan = frontier.pop()
-        if problem.isGoalState(state):
-            return plan
+        state = frontier.pop()
         for next_state, action, _ in problem.getSuccessors(state):
-            if next_state not in visited:
-                visited.add(next_state)
-                frontier.push((next_state, plan + [action]))
+            if next_state not in parent:
+                parent[next_state] = (state, action)
+                if problem.isGoalState(next_state):
+                    # Reconstruir plan hacia atrás
+                    plan = []
+                    cur = next_state
+                    while parent[cur] is not None:
+                        prev, act = parent[cur]
+                        plan.append(act)
+                        cur = prev
+                    plan.reverse()
+                    return plan
+                frontier.push(next_state)
 
     return []
 
@@ -193,25 +206,24 @@ def backwardSearch(problem: Problem) -> list[Action]:
     Returns a list of Action objects forming a valid plan (in forward order),
     or [] if no plan exists.
 
-    Tip: The "state" in backward search is a frozenset of fluents that must
-         be true (a partial goal description). The initial state is reached
-         when all fluents in the current goal are satisfied by problem.initial_state.
-         Only consider actions whose add_list has at least one unsatisfied goal fluent
-         (relevant actions). Use regress() to compute the new subgoal.
-         Skip subgoals that contain static predicates (MedicalPost, Adjacent,
-         Pickable) that are false in the initial state — these are dead ends.
+    OPTIMIZACIÓN: usa problem._add_index para obtener solo acciones relevantes
+    al goal actual, en vez de iterar todos los groundings en cada nodo.
     """
     ### Your code here ###
     static = {"MedicalPost", "Adjacent"}
-    all_actions = get_all_groundings(problem.domain, problem.objects)
+    # Preferir el índice pre-computado si está disponible
+    add_index = getattr(problem, "_add_index", None)
+    all_actions = problem._all_groundings if hasattr(problem, "_all_groundings") \
+        else get_all_groundings(problem.domain, problem.objects)
 
     def simplify(goal_desc):
-        """Elimina fluents estáticos satisfechos — nunca cambian, siempre verdaderos."""
-        return frozenset(f for f in goal_desc if f[0] not in static or f not in problem.initial_state)
+        """Elimina fluents estáticos satisfechos — nunca cambian."""
+        return frozenset(f for f in goal_desc
+                         if f[0] not in static or f not in problem.initial_state)
 
     def is_consistent(goal_desc):
-        """Descarta goals donde la misma entidad aparece At en dos lugares distintos."""
-        at_locs = {}
+        """Descarta goals donde la misma entidad aparece At en dos lugares."""
+        at_locs: dict = {}
         for f in goal_desc:
             if f[0] == "At":
                 entity, loc = f[1], f[2]
@@ -219,6 +231,23 @@ def backwardSearch(problem: Problem) -> list[Action]:
                     return False
                 at_locs[entity] = loc
         return True
+
+    def get_relevant_actions(unsatisfied):
+        """
+        Devuelve acciones que producen al menos un fluente insatisfecho.
+        Con el índice inverso esto es O(|unsatisfied| * k) en vez de O(|groundings|).
+        """
+        if add_index is not None:
+            seen: set = set()
+            relevant = []
+            for fluent in unsatisfied:
+                for action in add_index.get(fluent, []):
+                    if id(action) not in seen:
+                        seen.add(id(action))
+                        relevant.append(action)
+            return relevant
+        # Fallback sin índice
+        return [a for a in all_actions if not a.add_list.isdisjoint(unsatisfied)]
 
     frontier = Queue()
     start = simplify(problem.goal)
@@ -233,10 +262,9 @@ def backwardSearch(problem: Problem) -> list[Action]:
             return plan
 
         unsatisfied = goal_desc - problem.initial_state
+        relevant_actions = get_relevant_actions(unsatisfied)
 
-        for action in all_actions:
-            if action.add_list.isdisjoint(unsatisfied):
-                continue
+        for action in relevant_actions:
             new_goal = regress(goal_desc, action)
             if new_goal is None:
                 continue
@@ -272,33 +300,45 @@ def aStarPlanner(
 
     Returns a list of Action objects forming a valid plan, or [] if no plan exists.
 
-    Tip: The heuristic signature is heuristic(state, goal, domain, objects) → float.
-         Use PriorityQueue with priority = g + h(next_state).
-         Track the best g-cost seen for each state to avoid stale expansions.
+    OPTIMIZACIÓN: igual que forwardBFS, usamos dict de punteros padre para
+    evitar copiar la lista de acciones en cada nodo (O(d²) → O(d) total).
     """
     ### Your code here ###
     start = problem.getStartState()
+
+    if problem.isGoalState(start):
+        return []
+
     h0 = heuristic(start, problem.goal, problem.domain, problem.objects)
     frontier = PriorityQueue()
-    frontier.push((start, []), h0)
-    best_g = {start: 0}
+    frontier.push(start, h0)
+
+    # parent[state] = (parent_state, action_taken)
+    parent: dict = {start: None}
+    best_g: dict = {start: 0}
 
     while not frontier.isEmpty():
-        state, plan = frontier.pop()
-        g = len(plan)
+        state = frontier.pop()
+        g = best_g[state]
 
         if problem.isGoalState(state):
+            # Reconstruir plan
+            plan = []
+            cur = state
+            while parent[cur] is not None:
+                prev, act = parent[cur]
+                plan.append(act)
+                cur = prev
+            plan.reverse()
             return plan
-
-        if g > best_g.get(state, float("inf")):
-            continue
 
         for next_state, action, cost in problem.getSuccessors(state):
             new_g = g + cost
             if new_g < best_g.get(next_state, float("inf")):
                 best_g[next_state] = new_g
+                parent[next_state] = (state, action)
                 h = heuristic(next_state, problem.goal, problem.domain, problem.objects)
-                frontier.push((next_state, plan + [action]), new_g + h)
+                frontier.push(next_state, new_g + h)
 
     return []
     ### End of your code ###
@@ -309,3 +349,4 @@ tinyBaseSearch = tinyBaseSearch
 forwardBFS = forwardBFS
 backwardSearch = backwardSearch
 aStarPlanner = aStarPlanner
+forwardSearch = forwardBFS

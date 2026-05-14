@@ -2,6 +2,19 @@ from __future__ import annotations
 
 from itertools import product
 
+# ---------------------------------------------------------------------------
+# OPTIMIZACIÓN: Caché global de groundings
+# get_all_groundings se llama en CADA paso de ignoreDeleteListsHeuristic
+# (hill-climbing). En mapas medianos genera >3000 objetos Action repetidamente.
+# Con la caché se calcula UNA sola vez por dominio+objetos.
+# ---------------------------------------------------------------------------
+_groundings_cache: dict[tuple, list] = {}
+
+
+def _objects_key(objects: dict) -> tuple:
+    """Clave hashable para un diccionario de objetos."""
+    return tuple((k, tuple(objects[k])) for k in sorted(objects.keys()))
+
 
 # ---------------------------------------------------------------------------
 # Type aliases (for readability in signatures and docstrings)
@@ -134,6 +147,18 @@ class Problem:
         self.domain = domain
         self.objects = objects
         self._expanded = 0
+        # Pre-computar groundings UNA sola vez al crear el problema.
+        # getSuccessors() se llama miles de veces; sin esto get_all_groundings
+        # se recalculaba en cada llamada (aunque el cache lo mitiga).
+        self._all_groundings = get_all_groundings(self.domain, self.objects)
+
+        # Índice inverso: fluente → lista de acciones que lo producen.
+        # Permite a backwardSearch encontrar acciones relevantes en O(k)
+        # (k = acciones que producen ese fluente) en vez de O(|groundings|).
+        self._add_index: dict[tuple, list] = {}
+        for action in self._all_groundings:
+            for fluent in action.add_list:
+                self._add_index.setdefault(fluent, []).append(action)
 
     def getStartState(self) -> State:
         return self.initial_state
@@ -144,8 +169,6 @@ class Problem:
     def getSuccessors(self, state: State) -> list[tuple[State, Action, int]]:
         """Return list of (next_state, action, cost=1) triples."""
         self._expanded += 1
-        if not hasattr(self, "_all_groundings"):
-            self._all_groundings = get_all_groundings(self.domain, self.objects)
         successors = []
         for action in self._all_groundings:
             if is_applicable(state, action):
@@ -192,7 +215,16 @@ def get_all_groundings(domain: list[ActionSchema], objects: Objects) -> list[Act
     """
     Return ALL grounded actions for every schema in domain,
     regardless of applicability. Used internally by Problem and backward search.
+
+    OPTIMIZACIÓN: caché global. Las heurísticas (especialmente ignoreDeleteLists
+    con su hill-climbing) llamaban a esta función en CADA paso de búsqueda,
+    generando miles de objetos Action idénticos. Con la caché se generan
+    UNA sola vez por combinación de dominio+objetos.
     """
+    cache_key = (tuple(s.name for s in domain), _objects_key(objects))
+    if cache_key in _groundings_cache:
+        return _groundings_cache[cache_key]
+
     type_map: dict[str, list] = {
         "r": objects["robots"],
         "loc": objects["cells"],
@@ -212,6 +244,8 @@ def get_all_groundings(domain: list[ActionSchema], objects: Objects) -> list[Act
                 continue
             binding = dict(zip(schema.parameters, values))
             groundings.append(schema.ground(binding))
+
+    _groundings_cache[cache_key] = groundings
     return groundings
 
 
@@ -240,4 +274,3 @@ def get_applicable_actions(
     """
     
     return [a for a in get_all_groundings(domain, objects) if is_applicable(state, a)]
-    
