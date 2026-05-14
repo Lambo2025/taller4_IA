@@ -206,18 +206,91 @@ def backwardSearch(problem: Problem) -> list[Action]:
     Returns a list of Action objects forming a valid plan (in forward order),
     or [] if no plan exists.
 
-    OPTIMIZACIÓN: usa problem._add_index para obtener solo acciones relevantes
-    al goal actual, en vez de iterar todos los groundings en cada nodo.
+    OPTIMIZACIONES:
+    1. Usa _add_index para filtrar acciones relevantes en O(k) en vez de O(|groundings|).
+    2. Separa acciones de navegación (Move) de acciones simbólicas: solo regresa
+       acciones simbólicas (PickUp, PutDown, Rescue, SetupSupplies) en el BFS
+       principal. La navegación entre celdas se resuelve con BFS de movimientos
+       puros cuando el goal requiere At(robot, destino).
+    3. Filtros de poda agresivos para dead-ends.
     """
     ### Your code here ###
     static = {"MedicalPost", "Adjacent"}
-    # Preferir el índice pre-computado si está disponible
     add_index = getattr(problem, "_add_index", None)
     all_actions = problem._all_groundings if hasattr(problem, "_all_groundings") \
         else get_all_groundings(problem.domain, problem.objects)
 
+    # Separar acciones de movimiento de acciones simbólicas
+    move_actions    = [a for a in all_actions if a.name.startswith("Move")]
+    symbolic_actions = [a for a in all_actions if not a.name.startswith("Move")]
+
+    # Celdas adyacentes para navegar
+    adj: dict = {}
+    for f in problem.initial_state:
+        if f[0] == "Adjacent":
+            adj.setdefault(f[1], []).append(f[2])
+
+    def robot_can_reach(from_cell, to_cell) -> bool:
+        """BFS de celdas para comprobar si el robot puede ir de from→to."""
+        if from_cell == to_cell:
+            return True
+        visited_cells: set = {from_cell}
+        q: list = [from_cell]
+        while q:
+            cur = q.pop()
+            for nb in adj.get(cur, []):
+                if nb == to_cell:
+                    return True
+                if nb not in visited_cells:
+                    visited_cells.add(nb)
+                    q.append(nb)
+        return False
+
+    def nav_plan(from_cell, to_cell) -> list:
+        """BFS de celdas para obtener la secuencia de acciones Move."""
+        if from_cell == to_cell:
+            return []
+
+        # Índice: (from, to) → Action de Move, solo para pares adyacentes reales
+        move_index: dict = {}
+        for a in move_actions:
+            # Extraer from/to de las precondiciones
+            at_pre = next((f for f in a.precond_pos if f[0] == "At" and f[1] == "robot"), None)
+            at_add = next((f for f in a.add_list if f[0] == "At" and f[1] == "robot"), None)
+            if at_pre and at_add:
+                # Solo guardar si hay adyacencia real (la acción la exige)
+                adj_pre = next((f for f in a.precond_pos if f[0] == "Adjacent"), None)
+                if adj_pre:
+                    move_index[(at_pre[2], at_add[2])] = a
+
+        parent_cell: dict = {from_cell: None}
+        parent_action: dict = {from_cell: None}
+        q: list = [from_cell]
+        found = False
+        while q and not found:
+            cur = q.pop(0)
+            for nb in adj.get(cur, []):
+                if nb not in parent_cell and (cur, nb) in move_index:
+                    parent_cell[nb] = cur
+                    parent_action[nb] = move_index[(cur, nb)]
+                    if nb == to_cell:
+                        found = True
+                        break
+                    q.append(nb)
+
+        if not found:
+            return []
+
+        path = []
+        c = to_cell
+        while parent_action[c] is not None:
+            path.append(parent_action[c])
+            c = parent_cell[c]
+        path.reverse()
+        return path
+
     def simplify(goal_desc):
-        """Elimina fluents estáticos satisfechos — nunca cambian."""
+        """Elimina fluents estáticos satisfechos."""
         return frozenset(f for f in goal_desc
                          if f[0] not in static or f not in problem.initial_state)
 
@@ -232,22 +305,149 @@ def backwardSearch(problem: Problem) -> list[Action]:
                 at_locs[entity] = loc
         return True
 
-    def get_relevant_actions(unsatisfied):
-        """
-        Devuelve acciones que producen al menos un fluente insatisfecho.
-        Con el índice inverso esto es O(|unsatisfied| * k) en vez de O(|groundings|).
-        """
+    def get_relevant_symbolic(unsatisfied):
+        """Solo acciones simbólicas relevantes (no Move)."""
         if add_index is not None:
             seen: set = set()
             relevant = []
             for fluent in unsatisfied:
                 for action in add_index.get(fluent, []):
-                    if id(action) not in seen:
+                    if not action.name.startswith("Move") and id(action) not in seen:
                         seen.add(id(action))
                         relevant.append(action)
             return relevant
-        # Fallback sin índice
-        return [a for a in all_actions if not a.add_list.isdisjoint(unsatisfied)]
+        return [a for a in symbolic_actions if not a.add_list.isdisjoint(unsatisfied)]
+
+    def resolve_navigation(goal_desc, partial_plan):
+        """
+        Si el goal tiene At(robot, dest) y el robot empieza en robot_start,
+        inserta los movimientos necesarios al principio del plan.
+        """
+        robot_start = None
+        for f in problem.initial_state:
+            if f[0] == "At" and f[1] == "robot":
+                robot_start = f[2]
+                break
+
+        # Encontrar destino del robot en el goal
+        robot_dest = None
+        for f in goal_desc:
+            if f[0] == "At" and f[1] == "robot":
+                robot_dest = f[2]
+                break
+
+        if robot_dest is None or robot_dest == robot_start:
+            return partial_plan
+
+        moves = nav_plan(robot_start, robot_dest)
+        return moves + partial_plan
+
+def backwardSearch(problem: Problem) -> list[Action]:
+    """
+    Backward search (regression search) from the goal.
+
+    Start from the goal description and apply action regressions until
+    the resulting goal is satisfied by the initial state.
+
+    Returns a list of Action objects forming a valid plan (in forward order),
+    or [] if no plan exists.
+
+    OPTIMIZACIONES para evitar la explosión con Move:
+    1. Move solo se regresa cuando At(robot, dest) está en el goal Y dest no
+       es la posición inicial del robot (ya que si ya está ahí no hace falta mover).
+    2. Para Move, solo se generan acciones cuyo from_cell es adyacente al dest
+       (ya pre-filtrado en el índice de adyacencia).
+    3. Poda de consistencia fuerte: entidad en dos sitios, o dos objetos en mano.
+    4. Poda de Pickable: si el goal requiere Pickable(x) pero x ya no es pickable
+       en initial_state, es dead-end.
+    """
+    ### Your code here ###
+    static = {"MedicalPost", "Adjacent"}
+
+    all_actions = problem._all_groundings if hasattr(problem, "_all_groundings") \
+        else get_all_groundings(problem.domain, problem.objects)
+    add_index = getattr(problem, "_add_index", None)
+
+    # Posición inicial del robot
+    robot_init_pos = next(
+        (f[2] for f in problem.initial_state if f[0] == "At" and f[1] == "robot"), None
+    )
+
+    # Índice de adyacencia: celda → celdas adyacentes
+    adj: dict = {}
+    for f in problem.initial_state:
+        if f[0] == "Adjacent":
+            adj.setdefault(f[1], []).append(f[2])
+
+    # Para Move: solo groundings adyacentes reales (from, to adyacentes)
+    adjacent_pairs: set = set()
+    for f in problem.initial_state:
+        if f[0] == "Adjacent":
+            adjacent_pairs.add((f[1], f[2]))
+
+    # Índice (from_cell, to_cell) → Move action, SOLO pares adyacentes reales
+    move_adj_index: dict = {}
+    for a in all_actions:
+        if not a.name.startswith("Move"):
+            continue
+        at_pre = next((f for f in a.precond_pos if f[0] == "At" and f[1] == "robot"), None)
+        at_add = next((f for f in a.add_list    if f[0] == "At" and f[1] == "robot"), None)
+        if at_pre and at_add:
+            frm, to = at_pre[2], at_add[2]
+            # Solo incluir si (from, to) es un par adyacente real en el mapa
+            if (frm, to) in adjacent_pairs:
+                move_adj_index[(frm, to)] = a
+
+    def simplify(goal_desc):
+        return frozenset(f for f in goal_desc
+                         if f[0] not in static or f not in problem.initial_state)
+
+    def is_consistent(goal_desc):
+        at_locs: dict = {}
+        holding: list = []
+        for f in goal_desc:
+            if f[0] == "At":
+                e, l = f[1], f[2]
+                if e in at_locs and at_locs[e] != l:
+                    return False
+                at_locs[e] = l
+            elif f[0] == "Holding":
+                holding.append(f[2])
+        return len(set(holding)) <= 1
+
+    def get_relevant(unsatisfied):
+        """
+        Acciones simbólicas para fluentes simbólicos.
+        Acciones Move SOLO para fluentes At(robot, dest) donde dest ≠ robot_init_pos
+        y se devuelven solo las Move cuyo to_cell = dest (las adyacentes al goal).
+        """
+        seen: set = set()
+        result: list = []
+
+        for fluent in unsatisfied:
+            if fluent[0] == "At" and fluent[1] == "robot":
+                dest = fluent[2]
+                if dest == robot_init_pos:
+                    continue   # el robot ya está ahí en el initial state
+                # Solo Move acciones que llevan al robot a dest
+                for (frm, to), action in move_adj_index.items():
+                    if to == dest and id(action) not in seen:
+                        seen.add(id(action))
+                        result.append(action)
+            else:
+                if add_index is not None:
+                    for action in add_index.get(fluent, []):
+                        if not action.name.startswith("Move") and id(action) not in seen:
+                            seen.add(id(action))
+                            result.append(action)
+                else:
+                    for action in all_actions:
+                        if not action.name.startswith("Move") and \
+                           fluent in action.add_list and id(action) not in seen:
+                            seen.add(id(action))
+                            result.append(action)
+
+        return result
 
     frontier = Queue()
     start = simplify(problem.goal)
@@ -262,9 +462,9 @@ def backwardSearch(problem: Problem) -> list[Action]:
             return plan
 
         unsatisfied = goal_desc - problem.initial_state
-        relevant_actions = get_relevant_actions(unsatisfied)
+        relevant = get_relevant(unsatisfied)
 
-        for action in relevant_actions:
+        for action in relevant:
             new_goal = regress(goal_desc, action)
             if new_goal is None:
                 continue
@@ -349,4 +549,6 @@ tinyBaseSearch = tinyBaseSearch
 forwardBFS = forwardBFS
 backwardSearch = backwardSearch
 aStarPlanner = aStarPlanner
+
+# Aliases for command-line names used by main.py
 forwardSearch = forwardBFS
