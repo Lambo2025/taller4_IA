@@ -217,7 +217,7 @@ def build_htn_hierarchy(problem: Problem) -> list[HLA]:
         return next((f[2] for f in state if f[0] == "At" and f[1] == entity), None)
 
     # -----------------------------------------------------------------------
-    # DynamicHLA: HLA que genera refinamientos según el estado actual
+    # DynamicHLA: HLA que genera arreglos según el estado actual
     # -----------------------------------------------------------------------
     class DynamicHLA(HLA):
         def __init__(self, name, expand_fn):
