@@ -62,7 +62,6 @@ def hierarchicalSearch(problem: Problem, hlas: list[HLA]) -> list[Action]:
            2. Executing it from the initial state reaches a goal state.
          To simulate execution, apply each action in order using apply_action().
     """
-    ### Your code here ###
     from planning.utils import Queue
     from planning.pddl import get_all_groundings
 
@@ -139,7 +138,6 @@ def hierarchicalSearch(problem: Problem, hlas: list[HLA]) -> list[Action]:
             frontier.push((new_plan, state))
 
     return []
-    ### End of your code ###
 
 
 # ---------------------------------------------------------------------------
@@ -159,8 +157,6 @@ def build_htn_hierarchy(problem: Problem) -> list[HLA]:
 
     Refinements are built from the ground state to generate concrete Action objects.
     """
-    ### Your code here ###
-
     robot    = problem.objects["robots"][0]
     patients = problem.objects["patients"]
     supplies = problem.objects["supplies"]
@@ -347,4 +343,3 @@ def build_htn_hierarchy(problem: Problem) -> list[HLA]:
             top_level.append(make_full_rescue(supply, patient, medical_post))
 
     return top_level
-    ### End of your code ###
